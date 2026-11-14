@@ -1,0 +1,6 @@
+{
+  "name": "HostCraft — Short-Term Rental Listing & Welcome Kit Studio",
+  "description": "Analyze property photos and host notes to generate SEO Airbnb & Booking.com listings, verified amenities, 6-language guest welcome guides, and ready-to-send message templates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
