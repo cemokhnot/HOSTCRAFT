@@ -8,10 +8,11 @@ export const config = {
   },
 };
 
-const MODEL_CANDIDATES = [
+const INITIAL_MODELS = [
   process.env.GEMINI_MODEL,
-  'gemini-3.8-flash',
-  'gemini-flash-latest',
+  'gemini-2.0-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash-lite',
 ].filter(Boolean) as string[];
 
 const RESPONSE_SCHEMA = {
@@ -30,10 +31,10 @@ const RESPONSE_SCHEMA = {
         DE: { type: Type.STRING },
         FR: { type: Type.STRING },
         IT: { type: Type.STRING },
-        ES: { type: Type.STRING },
+        NL: { type: Type.STRING },
         GR: { type: Type.STRING },
       },
-      required: ['EN', 'DE', 'FR', 'IT', 'ES', 'GR'],
+      required: ['EN', 'DE', 'FR', 'IT', 'NL', 'GR'],
     },
     message_templates: {
       type: Type.OBJECT,
@@ -75,7 +76,7 @@ function normalizeKit(rawKit: Record<string, any>) {
       DE: String(rawKit.welcome_guide?.DE || ''),
       FR: String(rawKit.welcome_guide?.FR || ''),
       IT: String(rawKit.welcome_guide?.IT || ''),
-      ES: String(rawKit.welcome_guide?.ES || ''),
+      NL: String(rawKit.welcome_guide?.NL || ''),
       GR: String(rawKit.welcome_guide?.GR || ''),
     },
     message_templates: {
@@ -83,6 +84,39 @@ function normalizeKit(rawKit: Record<string, any>) {
       checkout: String(rawKit.message_templates?.checkout || ''),
     },
   };
+}
+
+async function discoverAvailableModels(apiKey: string): Promise<string[]> {
+  try {
+    const resp = await fetch(
+      `[https://generativelanguage.googleapis.com/v1beta/models?key=$](https://generativelanguage.googleapis.com/v1beta/models?key=$){encodeURIComponent(apiKey)}`
+    );
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    const models: any[] = Array.isArray(data?.models) ? data.models : [];
+
+    const valid = models
+      .filter(
+        (m) =>
+          Array.isArray(m.supportedGenerationMethods) &&
+          m.supportedGenerationMethods.includes('generateContent') &&
+          typeof m.name === 'string' &&
+          m.name.includes('gemini') &&
+          !m.name.includes('embedding') &&
+          !m.name.includes('imagen') &&
+          !m.name.includes('veo')
+      )
+      .map((m) => m.name.replace(/^models\//, ''));
+
+    // Prioritize flash models for speed and multimodal support
+    const flashFirst = [
+      ...valid.filter((name) => name.includes('flash')),
+      ...valid.filter((name) => !name.includes('flash')),
+    ];
+    return Array.from(new Set(flashFirst));
+  } catch {
+    return [];
+  }
 }
 
 export default async function handler(req: any, res: any) {
@@ -101,7 +135,7 @@ export default async function handler(req: any, res: any) {
     return res.status(400).json({ error: 'Please provide at least one photo or host notes.' });
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey, apiVersion: 'v1beta' });
 
   const parts: any[] = [];
   for (const photo of Array.isArray(photos) ? photos.slice(0, 8) : []) {
@@ -129,35 +163,58 @@ Rules:
 4. Provide 2 guest message templates (welcome and checkout).`,
   });
 
+  const tried = new Set<string>();
   let lastError: any = null;
 
-  for (const model of MODEL_CANDIDATES) {
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
+  const tryModels = async (candidates: string[]) => {
+    for (const model of candidates) {
+      if (tried.has(model)) continue;
+      tried.add(model);
 
-      const parsed = sanitizeJsonResponse(response.text || '{}');
-      const kit = normalizeKit(parsed);
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+          },
+        });
 
-      return res.status(200).json({ kit, modelUsed: model });
-    } catch (err: any) {
-      lastError = err;
-      const status = err?.status || err?.code;
-      // Retry with fallback model only on 404 (deprecated model) or 503 (temporary overload)
-      if (status === 404 || status === 503 || String(err?.message || '').includes('no longer available')) {
-        continue;
+        const parsed = sanitizeJsonResponse(response.text || '{}');
+        const kit = normalizeKit(parsed);
+        return { kit, modelUsed: model };
+      } catch (err: any) {
+        lastError = err;
+        const msg = String(err?.message || '');
+        const status = err?.status || err?.code;
+        if (status === 404 || status === 503 || msg.includes('not found') || msg.includes('no longer available')) {
+          continue;
+        }
+        throw err;
       }
-      break;
     }
+    return null;
+  };
+
+  try {
+    // 1. Try initial known candidates
+    let result = await tryModels(INITIAL_MODELS);
+
+    // 2. Auto-discover active models from Google if initial ones returned 404
+    if (!result) {
+      const discovered = await discoverAvailableModels(apiKey);
+      result = await tryModels(discovered);
+    }
+
+    if (result) {
+      return res.status(200).json(result);
+    }
+  } catch (err: any) {
+    lastError = err;
   }
 
-  console.error('Analyze API failed across all models:', lastError);
+  console.error('Analyze API failed:', lastError);
   return res.status(500).json({
     error: lastError?.message || 'Unable to generate listing kit right now. Please try again.',
   });
