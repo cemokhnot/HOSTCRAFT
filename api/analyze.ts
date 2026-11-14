@@ -10,9 +10,9 @@ export const config = {
 
 const INITIAL_MODELS = [
   process.env.GEMINI_MODEL,
-  'gemini-2.0-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-2.0-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.0-flash',
 ].filter(Boolean) as string[];
 
 const RESPONSE_SCHEMA = {
@@ -108,7 +108,6 @@ async function discoverAvailableModels(apiKey: string): Promise<string[]> {
       )
       .map((m) => m.name.replace(/^models\//, ''));
 
-    // Prioritize flash models for speed and multimodal support
     const flashFirst = [
       ...valid.filter((name) => name.includes('flash')),
       ...valid.filter((name) => !name.includes('flash')),
@@ -159,7 +158,7 @@ Host Rough Notes: ${String(notes || 'Not specified').slice(0, 3000)}
 Rules:
 1. Detect real amenities strictly visible in the photos or explicitly mentioned in notes. Do NOT hallucinate unconfirmed features.
 2. Write an SEO-optimized Title in English (strictly maximum 50 characters) and a structured, scannable English Description.
-3. Translate the Digital Welcome Guide (Wi-Fi, check-in, rules, tips) into EN, DE, FR, IT, ES, and GR.
+3. Translate the Digital Welcome Guide (Wi-Fi, check-in, rules, tips) into EN, DE, FR, IT, NL (Dutch), and GR.
 4. Provide 2 guest message templates (welcome and checkout).`,
   });
 
@@ -186,22 +185,20 @@ Rules:
         return { kit, modelUsed: model };
       } catch (err: any) {
         lastError = err;
-        const msg = String(err?.message || '');
-        const status = err?.status || err?.code;
-        if (status === 404 || status === 503 || msg.includes('not found') || msg.includes('no longer available')) {
-          continue;
+        const msg = JSON.stringify(err || '').toLowerCase();
+        // Only stop immediately on invalid API key; otherwise keep trying fallbacks
+        if (msg.includes('api_key_invalid') || msg.includes('api key not valid')) {
+          throw err;
         }
-        throw err;
+        continue;
       }
     }
     return null;
   };
 
   try {
-    // 1. Try initial known candidates
     let result = await tryModels(INITIAL_MODELS);
 
-    // 2. Auto-discover active models from Google if initial ones returned 404
     if (!result) {
       const discovered = await discoverAvailableModels(apiKey);
       result = await tryModels(discovered);
